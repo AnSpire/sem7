@@ -34,6 +34,23 @@ def _citation_label(c: dict) -> str:
     return f"[{c['n']}] {c['doc_id']} §{c['section']} стр.{_pages(c)}"
 
 
+def _gold_label(q: dict) -> str:
+    return ", ".join(
+        f"{g['doc_id']} §{g['section']}" + (f" стр.{g['pages']}" if g.get("pages") else "")
+        for g in q.get("gold") or []
+    )
+
+
+def _reference(q: dict) -> str:
+    return q.get("reference") or q.get("expected") or "—"
+
+
+def _manual_comment(r: dict) -> str:
+    codes = ", ".join(r.get("manual_error_codes") or [])
+    comment = r.get("manual_comment") or ""
+    return f"{codes}: {comment}" if codes and comment else codes or comment
+
+
 def _rate(values: list[bool]) -> float | None:
     return round(sum(values) / len(values), 3) if values else None
 
@@ -81,7 +98,7 @@ def _checks_hint(checks: dict) -> str:
     return "; ".join(f"{k}={v}" for k, v in checks.items())
 
 
-def write_csv(run_dir: Path, records: list[dict]) -> Path:
+def write_csv(run_dir: Path, records: list[dict], questions: dict) -> Path:
     path = run_dir / "results.csv"
     header = [
         "№",
@@ -89,6 +106,8 @@ def write_csv(run_dir: Path, records: list[dict]) -> Path:
         "Найденные фрагменты",
         "Источники",
         "Ответ LLM",
+        "Эталонный ответ",
+        "Эталонные источники",
         "Оценка",
         "Комментарий / тип ошибки",
         "Подсказки проверок",
@@ -98,6 +117,7 @@ def write_csv(run_dir: Path, records: list[dict]) -> Path:
         w = csv.writer(f, delimiter=";")
         w.writerow(header)
         for r in records:
+            q = questions.get(r["id"], {})
             w.writerow(
                 [
                     r["id"],
@@ -105,8 +125,10 @@ def write_csv(run_dir: Path, records: list[dict]) -> Path:
                     "\n".join(_fragment_label(c) for c in r["retrieved"]),
                     "\n".join(_citation_label(c) for c in r["citations"]),
                     r["answer_text"] if not r.get("error") else f"ОШИБКА: {r['error']}",
-                    "",
-                    "",
+                    _reference(q),
+                    _gold_label(q),
+                    "" if r.get("manual_score") is None else r["manual_score"],
+                    _manual_comment(r),
                     _checks_hint(r["checks"]),
                     ", ".join(r["suggested_error_codes"]),
                 ]
@@ -154,22 +176,17 @@ def write_md(
     lines += ["", "## Вопросы", ""]
     for r in records:
         q = questions.get(r["id"], {})
-        reference = q.get("reference") or q.get("expected") or "—"
         lines += [
             f"### {r['id']}. {r['question']}",
             "",
             f"*Тип:* {r['type']}"
             + (f" · *категория:* {q['category']}" if q.get("category") else ""),
             "",
-            f"**Эталон:** {reference}",
+            f"**Эталон:** {_reference(q)}",
             "",
         ]
         if q.get("gold"):
-            gold = ", ".join(
-                f"{g['doc_id']} §{g['section']}" + (f" стр.{g['pages']}" if g.get("pages") else "")
-                for g in q["gold"]
-            )
-            lines += [f"**Эталонные источники:** {gold}", ""]
+            lines += [f"**Эталонные источники:** {_gold_label(q)}", ""]
         if r.get("error"):
             lines += [f"**ОШИБКА:** `{r['error']}`", ""]
             continue
@@ -203,6 +220,11 @@ def write_md(
             f"**Предварительные коды:** {', '.join(r['suggested_error_codes']) or '—'}",
             "",
         ]
+        if r.get("manual_score") is not None:
+            lines += [
+                f"**Оценка:** {r['manual_score']} — {_manual_comment(r) or '—'}",
+                "",
+            ]
     path = run_dir / "results.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
@@ -287,7 +309,7 @@ def build_reports(run_dirs: list[Path], questions_path: Path, snippet: int) -> l
     for run_dir in run_dirs:
         config, records = load_run(run_dir)
         runs.append((run_dir, config, records))
-        written.append(write_csv(run_dir, records))
+        written.append(write_csv(run_dir, records, questions))
         written.append(write_md(run_dir, config, records, questions, snippet))
     if len(runs) > 1:
         written.append(write_comparison(runs, run_dirs[0].parent / "comparison.md"))
